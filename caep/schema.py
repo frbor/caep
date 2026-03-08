@@ -52,6 +52,46 @@ Arrays = dict[str, ArrayInfo]
 Dicts = dict[str, DictInfo]
 
 
+def resolve_schema(
+    schema: dict[str, Any], schema_defs: dict[str, Any]
+) -> dict[str, Any]:
+    """
+    Resolve pydantic schema indirections for a single field.
+
+    CAEP supports flat primitive, array and dict fields. Local refs are accepted
+    when they ultimately resolve to one of those schema shapes; nested model refs
+    are still rejected later in parser construction.
+    """
+
+    resolved = dict(schema)
+
+    for types in resolved.get("anyOf", []):
+        if types.get("type") != "null":
+            resolved.update(**types)
+
+    ref = resolved.get("$ref")
+    if not ref:
+        return resolved
+
+    if not ref.startswith("#/"):
+        return resolved
+
+    ref_path = ref[2:].split("/")
+    ref_target: Any = schema_defs
+
+    for key in ref_path[1:]:
+        if not isinstance(ref_target, dict) or key not in ref_target:
+            return resolved
+        ref_target = ref_target[key]
+
+    if not isinstance(ref_target, dict):
+        return resolved
+
+    merged = dict(ref_target)
+    merged.update({key: value for key, value in resolved.items() if key != "$ref"})
+    return merged
+
+
 def escape_split(
     value: str, split: str = DEFAULT_SPLIT, maxsplit: int = 0
 ) -> list[str]:
@@ -149,6 +189,7 @@ def split_arguments(
 
 def build_parser(  # noqa: C901
     fields: dict[str, dict[str, Any]],
+    schema_defs: dict[str, Any],
     description: str,
     epilog: Optional[str],
 ) -> tuple[argparse.ArgumentParser, Arrays, Dicts, Optional[str]]:
@@ -237,25 +278,7 @@ def build_parser(  # noqa: C901
             unknown_args_field = field
             continue
 
-        # In pydantic 2.0+ some fields are represented with anyOf, like this:
-        #
-        # "path": {
-        #     "anyOf": [
-        #         {
-        #             "format": "path",
-        #             "type": "string"
-        #         },
-        #         {
-        #             "type": "null"
-        #         }
-        #     ],
-        #     "description": "Path",
-        #     "title": "Path"
-        #
-
-        for types in schema.get("anyOf", []):
-            if types.get("type") != "null":
-                schema.update(**types)
+        schema = resolve_schema(schema, schema_defs)
 
         if "type" not in schema:
             raise FieldError(
@@ -281,6 +304,12 @@ def build_parser(  # noqa: C901
             field_type = str
 
         elif schema["type"] == "object":
+            if "additionalProperties" not in schema:
+                raise FieldError(
+                    "No type specified, recursive models are not supported: "
+                    f"{field}: {schema}"
+                )
+
             dict_type = TYPE_MAPPING.get(schema["additionalProperties"]["type"])
 
             if not dict_type:
@@ -370,15 +399,23 @@ def load(
     # `model_json_schema` in pydantic 2.x.
 
     if PYDANTIC_MAJOR_VERSION == "2":
-        fields = model.model_json_schema(alias).get("properties")
+        full_schema = model.model_json_schema(alias)
     else:
-        fields = model.schema(alias).get("properties")
+        full_schema = model.schema(alias)
+
+    fields = full_schema.get("properties")
+    schema_defs = cast(
+        dict[str, Any],
+        full_schema.get("$defs") or full_schema.get("definitions") or {},
+    )
 
     if not fields:
         raise SchemaError(f"Unable to get properties from schema {model}")
 
     # Build argument parser based on pydantic fields
-    parser, arrays, dicts, unknown_args_field = build_parser(fields, description, epilog)
+    parser, arrays, dicts, unknown_args_field = build_parser(
+        fields, schema_defs, description, epilog
+    )
 
     try:
         parsed_args, unknown_tokens = caep.config.handle_args(

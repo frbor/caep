@@ -8,6 +8,10 @@ at load time.
 
 # Change log
 
+## 1.7.0
+
+- Add support for enums.
+
 ## 1.6.0
 
 - Add support to retrieve unknown arguments using `json_schema_extra={"caep_unknown_args": True}`

@@ -4,6 +4,7 @@ import ipaddress
 import os
 import shlex
 import warnings
+from enum import IntEnum, StrEnum
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -153,6 +154,21 @@ class DoubleUnknownArgs(BaseModel):
     )
 
 
+class Mode(StrEnum):
+    ENABLED = "enabled"
+    DISABLED = "disabled"
+
+
+class Priority(IntEnum):
+    LOW = 1
+    HIGH = 2
+
+
+class EnumArguments(BaseModel):
+    mode: Mode = Field(description="Execution mode")
+    priority: Optional[Priority] = Field(default=None, description="Priority")
+
+
 def parse_args(
     model: type[caep.schema.BaseModelType],
     commandline: Optional[list[str]] = None,
@@ -201,6 +217,24 @@ def test_schema_namespaces() -> None:
     # Recusrive schemas are not supported
     with pytest.raises(FieldError):
         parse_args(ArgNs1, commandline)
+
+
+def test_schema_commandline_enum() -> None:
+    commandline = shlex.split("--mode enabled --priority 2")
+
+    config = parse_args(EnumArguments, commandline)
+
+    assert config.mode is Mode.ENABLED
+    assert config.priority is Priority.HIGH
+
+
+def test_schema_commandline_optional_enum_default_none() -> None:
+    commandline = shlex.split("--mode disabled")
+
+    config = parse_args(EnumArguments, commandline)
+
+    assert config.mode is Mode.DISABLED
+    assert config.priority is None
 
 
 def test_schema_commandline() -> None:
